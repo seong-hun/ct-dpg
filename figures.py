@@ -98,51 +98,48 @@ def plot_mult(dataset, color_cycle=None, names=None):
 
 
 def train_plot(savepath, **kwargs):
-    data = logging.load(savepath)
+    data, info = logging.load(savepath, with_info=True)
 
     canvas = []
-    fig, axes = plt.subplots(2, 2, sharex=True, num="hist")
-    axes[0, 0].set_ylabel(r"$\delta$")
-    axes[0, 1].set_ylabel(r"G Loss")
-    axes[1, 0].set_ylabel(r"$w, v$")
-    axes[1, 1].set_ylabel(r"$\theta$")
+    fig, axes = plt.subplots(2, 2, num="hist")
+    axes[0, 0].set_ylabel("Critic loss")
+    axes[0, 1].set_ylabel("Actor loss")
+    axes[1, 0].set_ylabel("Eigenvalues (real)")
+    axes[1, 1].set_ylabel("Parameters")
+    axes[0, 0].set_xlabel("Step")
+    axes[0, 1].set_xlabel("Epoch")
     axes[1, 0].set_xlabel("Epoch")
     axes[1, 1].set_xlabel("Epoch")
     canvas.append((fig, axes))
 
     fig, axes = canvas[0]
-    epoch = data["global_step"]
-    axes[0, 0].plot(
-        epoch,
-        data["loss"]["critic"].reshape(-1, data["loss"]["critic"][0].size),
-        **kwargs
-    )
-    axes[0, 1].plot(
-        epoch,
-        data["loss"]["actor"].reshape(-1, data["loss"]["actor"][0].size),
-        **kwargs
-    )
 
-    # theta = []
-    # for k, v in data["state_dict"].items():
-    #     if k.startswith("net_pi") and k.endswith("weight"):
-    #         theta.append(v.reshape(-1, v[0].size))
-    # theta = np.hstack(theta)
-    # theta = np.diff(theta, axis=0)
+    global_step = data["global_step"]
 
-    # axes[1, 1].plot(epoch[:-1], theta, **kwargs)
+    RUNNING_KWARGS = dict(kwargs, ls="-", c="r")
+    loss_critic = data["info"]["loss_critic"]
+    rloss_critic = data["info"]["rloss_critic"]
+    axes[0, 0].plot(global_step, loss_critic, **kwargs)
+    axes[0, 0].plot(global_step, rloss_critic, **RUNNING_KWARGS)
+    axes[0, 0].set_yscale("log")
 
-    # axes[1, 0].plot(
-    #     epoch,
-    #     data["v"].reshape(-1, data["v"][0].size),
-    #     **kwargs
-    # )
-    # ln, *_ = axes[1, 1].plot(
-    #     epoch,
-    #     data["theta"].reshape(
-    #         -1, np.multiply(*data["theta"][0].shape)),
-    #     **kwargs
-    # )
+    # epoch = data["epoch"]
+
+    # loss_actor = data["loss_actor"]
+    # axes[0, 1].plot(epoch, loss_actor, **kwargs)
+
+    # TRUE_KWARGS = dict(kwargs, ls="--", c="k")
+    # eigvals = data["eigvals"]
+    # true_eigvals = np.tile(info["true_eigvals"].real, (len(epoch), 1))
+    # axes[1, 0].plot(epoch, eigvals, **kwargs)
+    # axes[1, 0].plot(epoch, true_eigvals, **TRUE_KWARGS)
+
+    # param = data["param"]
+    # true_param = np.tile(info["true_param"].ravel(), (len(epoch), 1))
+    # param = param.reshape(-1, param[0].size)
+    # axes[1, 1].plot(epoch, param, **kwargs)
+    # axes[1, 1].plot(epoch, true_param, **TRUE_KWARGS)
+
     fig.tight_layout()
 
 

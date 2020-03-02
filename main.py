@@ -56,18 +56,24 @@ def _sample(i):
 @click.option("--max-epoch", "-n", default=100)
 @click.option("--batch-size", "-b", default=64)
 @click.option("--continue", "-c", is_flag=True)
+@click.option("--seed", default=0, type=int)
 def train(sampledir, **kwargs):
+    np.random.seed(kwargs["seed"])
+    torch.manual_seed(kwargs["seed"])
+
     samplefiles = common.parse_file(sampledir, ext="h5")
     data, info = logging.load(samplefiles[0], with_info=True)
 
     env = getattr(envs, info["env"])(**info["envparams"])
 
-    agentparams = dict(x_size=7, u_size=2, lr_h=1e-3, lr_g=1e-3, lr_pi=1e-5)
+    agentparams = dict(x_size=7, u_size=2, lr_h=1e-3, lr_g=1e-3, lr_pi=1e-4)
     agent = agents.Agent(
         **agentparams,
         reward_fn=env.reward,
         reward_grad_fn=env.reward_grad
     )
+
+    env.set_inner_ctrl(agent)
 
     expname = "-".join((env.name, agent.get_name()))
     expdir = os.path.join("data", "train", expname)
@@ -87,11 +93,15 @@ def train(sampledir, **kwargs):
         global_step = int(data["global_step"]) + 1
         mode = "r+"
 
+    true_param = env.K
+    true_eigvals = env.get_eigvals(true_param)
     info.update(
         agent=agent.__class__.__name__,
         agentparams=agentparams,
         expname=expname,
-        click=kwargs
+        click=kwargs,
+        true_param=true_param,
+        true_eigvals=true_eigvals.real
     )
     logger = logging.Logger(path=histpath, max_len=1, mode=mode)
     logger.set_info(info)
@@ -105,18 +115,21 @@ def train(sampledir, **kwargs):
 
     print(f"Training {expname} ...")
 
-    max_global = kwargs["max_epoch"] * len(dataloader)
-    logging_interval = int(1e-2 * max_global) or 10
-    print_interval = int(logging_interval / 5) or 10
-    save_interval = int(1e-1 * max_global) or 1
+    max_global = kwargs["max_epoch"] * len(dataloader) - 1
+    logging_interval = int(1e-4 * max_global) or 10
+    print_interval = int(1e-2 * max_global) or 10
+    save_interval = int(1e-2 * max_global) or 1
 
     epoch_final = epoch_init + kwargs["max_epoch"]
     t0 = time.time()
     for epoch in range(epoch_init, epoch_final):
-        desc = f"Epoch {epoch:2d}/{epoch_final - 1:2d}"
+        desc = f"Epoch {epoch:2d}/{epoch_final - 1:2d} | Critic"
+        rloss = 0
         for n, data in enumerate(tqdm(dataloader, desc=desc, leave=False)):
             agent.set_input(data)
-            agent.update()
+            loss = agent.update_critic()
+            rloss = n / (n + 1) * rloss + 1 / (n + 1) * loss
+            agent.info["rloss_critic"] = rloss
 
             if global_step % print_interval == 0:
                 msg = "\t".join([
@@ -125,22 +138,35 @@ def train(sampledir, **kwargs):
                 ])
                 tqdm.write(msg)
 
-            if (global_step % logging_interval == 0
-                    or global_step == len(dataloader)):
+            if global_step % logging_interval == 0 or global_step == max_global:
                 logger.record(
-                    epoch=epoch,
                     global_step=global_step,
-                    state_dict=copy.deepcopy(agent.state_dict()),
-                    loss=agent.info["loss"]
+                    info=agent.info
                 )
 
-            if (global_step % save_interval == 0
-                    or global_step == len(dataloader)):
-                savepath = os.path.join(expdir,
-                                        f"trained-{global_step:07d}.pth")
-                agent.save(epoch, global_step, savepath)
-
             global_step += 1
+
+        if rloss < 1000:
+            agent.actor_optimizer.zero_grad()
+            desc = f"Epoch {epoch:2d}/{epoch_final - 1:2d} | Actor"
+            for n, data in enumerate(tqdm(dataloader, desc=desc, leave=False)):
+                agent.set_input(data)
+                agent.update_actor()
+            agent.actor_optimizer.step()
+
+            param = env.get_param()
+            eigvals = env.get_eigvals(param)
+            logger.record(
+                epoch=epoch,
+                loss_actor=copy.deepcopy(agent.info["loss_actor"]),
+                param=param,
+                eigvals=eigvals.real,
+            )
+            agent.info["max_eigval"] = eigvals.real.max()
+
+        if epoch % save_interval == 0 or epoch == epoch_final - 1:
+            savepath = os.path.join(expdir, f"trained-{global_step:07d}.pth")
+            agent.save(epoch, global_step, savepath)
 
     logger.close()
 

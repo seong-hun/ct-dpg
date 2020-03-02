@@ -39,6 +39,20 @@ class F16(core.BaseEnv):
             )
             self.K = self.K * (1 + 0.05 * np.random.randn(*self.K.shape))
 
+    def step(self):
+        _, _, eager_done = self.update()
+        done = self.clock.time_over() or eager_done
+        return None, None, done, {}
+
+    def set_dot(self, time):
+        x = self.system.state
+        u = self.get_action(time, x)
+        self.system.dot = self.system.deriv(x, u)
+
+    def get_eigvals(self, param):
+        Ac = self.system.A + self.system.B.dot(param)
+        return np.linalg.eigvals(Ac)
+
     def get_info(self, i, t, y, t_hist, ode_hist):
         ny = ode_hist[i + 1]
         x, nx = [
@@ -55,16 +69,6 @@ class F16(core.BaseEnv):
             "reward": reward,
             "next_state": nx
         }
-
-    def step(self):
-        _, _, eager_done = self.update()
-        done = self.clock.time_over() or eager_done
-        return None, None, done, {}
-
-    def set_dot(self, time):
-        x = self.system.state
-        u = self.get_action(time, x)
-        self.system.dot = self.system.deriv(x, u)
 
     def get_action(self, t, x):
         return self.K.dot(x)

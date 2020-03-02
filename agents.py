@@ -1,3 +1,6 @@
+import copy
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -42,6 +45,7 @@ class PiNet(nn.Module):
     def __init__(self, x_size, u_size):
         super().__init__()
         self.model = get_batch_model(x_size, u_size, [], bias=False)
+        self.initialize()
 
     def forward(self, x):
         out = self.model(x)
@@ -71,10 +75,6 @@ class Agent(nn.Module):
         self.actor_optimizer = optim.Adam(
             self.net_pi.parameters(), lr=lr_pi)
         self.info = {}
-        self.info["loss"] = {}
-
-    def get_param(self):
-        return self.net_pi.model[0].weight.detach().numpy()
 
     def numpy_wrapper(self, fn):
         def wrapper(x, u):
@@ -89,46 +89,52 @@ class Agent(nn.Module):
     def set_input(self, data):
         self.data = data
 
-    def update(self):
+    def update_critic(self):
         self.critic_optimizer.zero_grad()
         x, u = self.data
         h = self.net_h(x, u)
         with torch.no_grad():
-            upi = self.net_pi(x)
-        hpi = self.net_h(x, upi)
+            # upi = self.net_pi(x)
+            pi = self.net_pi(x)
+        # hpi = self.net_h(x, upi)
         g = self.net_g(x, u)
-        pi = self.net_pi(x)
         R = self.reward(x, u) - self.reward(x, pi)
         delta_g = g - self.reward_grad(x, pi)
         loss = self.criterion(
             h + torch.einsum("bi,bi->b", delta_g, pi - u)[:, None], R)
-        loss += self.criterion(hpi, torch.zeros_like(hpi)) * 1e-2
+        # loss += self.criterion(hpi, torch.zeros_like(hpi)) * 1e-2
         loss.backward()
-        self.info["loss"]["critic"] = loss.detach().numpy()
+        loss = loss.detach().numpy()
+        self.info["loss_critic"] = loss
         self.critic_optimizer.step()
+        return loss
 
-        self.actor_optimizer.zero_grad()
+    def update_actor(self):
+        x, u = self.data
         with torch.no_grad():
-            g = self.net_g(x, upi)
+            g = self.net_g(x, self.net_pi(x))
         loss = torch.sum(self.net_pi(x) * g, axis=1).mean()
         # loss += self.criterion(self.net_pi(x), u) * 1e1
         loss.backward()
-        self.info["loss"]["actor"] = loss.detach().numpy()
-        self.actor_optimizer.step()
+        self.info["loss_actor"] = loss.detach().numpy()
 
     def get(self, t, x):
         x = torch.tensor(x).float()[None, :]
         u = self.net_pi(x)[0].detach().numpy()
         return u
 
+    def get_param(self):
+        return copy.deepcopy(self.net_pi.model[0].weight.detach().numpy())
+
     def get_name(self):
         return self.name
 
-    def get_msg(self):
-        loss_msg = [
-            f"{name} loss: {loss: 5.4f}"
-            for name, loss in self.info["loss"].items()]
-        return "  ".join(loss_msg)
+    def get_msg(self, **kwmsg):
+        msg = []
+        for name, info in dict(self.info, **kwmsg).items():
+            if not isinstance(info, str):
+                msg += [f"{name}: {info: 5.4f}"]
+        return "  ".join(msg)
 
     def save(self, epoch, global_step, path):
         torch.save({
