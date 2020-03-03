@@ -123,22 +123,22 @@ def train_plot(savepath, **kwargs):
     axes[0, 0].plot(global_step, rloss_critic, **RUNNING_KWARGS)
     axes[0, 0].set_yscale("log")
 
-    # epoch = data["epoch"]
+    epoch = data["epoch"]
 
-    # loss_actor = data["loss_actor"]
-    # axes[0, 1].plot(epoch, loss_actor, **kwargs)
+    loss_actor = data["loss_actor"]
+    axes[0, 1].plot(epoch, loss_actor, **kwargs)
 
-    # TRUE_KWARGS = dict(kwargs, ls="--", c="k")
-    # eigvals = data["eigvals"]
-    # true_eigvals = np.tile(info["true_eigvals"].real, (len(epoch), 1))
-    # axes[1, 0].plot(epoch, eigvals, **kwargs)
-    # axes[1, 0].plot(epoch, true_eigvals, **TRUE_KWARGS)
+    TRUE_KWARGS = dict(kwargs, ls="--", c="k")
+    eigvals = data["eigvals"]
+    true_eigvals = np.tile(info["true_eigvals"].real, (len(epoch), 1))
+    axes[1, 0].plot(epoch, eigvals, **kwargs)
+    axes[1, 0].plot(epoch, true_eigvals, **TRUE_KWARGS)
 
-    # param = data["param"]
-    # true_param = np.tile(info["true_param"].ravel(), (len(epoch), 1))
-    # param = param.reshape(-1, param[0].size)
-    # axes[1, 1].plot(epoch, param, **kwargs)
-    # axes[1, 1].plot(epoch, true_param, **TRUE_KWARGS)
+    param = data["param"]
+    true_param = np.tile(info["true_param"].ravel(), (len(epoch), 1))
+    param = param.reshape(-1, param[0].size)
+    axes[1, 1].plot(epoch, param, **kwargs)
+    axes[1, 1].plot(epoch, true_param, **TRUE_KWARGS)
 
     fig.tight_layout()
 
