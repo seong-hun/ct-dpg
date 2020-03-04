@@ -30,6 +30,9 @@ class OuNoise:
         if self.preprocessing:
             self.propagate(dt, max_t)
 
+    def __call__(self, t):
+        return self.get(t)
+
     def get(self, t):
         if not self.preprocessing:
             return self._get(t)

@@ -1,7 +1,10 @@
+import copy
 import numpy as np
 
 import fym.core as core
 import fym.agents.LQR as LQR
+
+import common
 
 
 class Base(core.BaseEnv):
@@ -10,11 +13,61 @@ class Base(core.BaseEnv):
 
     def set_inner_ctrl(self, inner_ctrl):
         self.inner_ctrl = inner_ctrl
-        self.get_action = inner_ctrl.get
+
+    def get_name(self):
+        return '-'.join([self.name, self.agent.name])
+
+
+class BaseInnerCtrl:
+    def __init__(self, xdim, udim):
+        self.xtrim = np.zeros((xdim, 1))
+        self.utrim = np.zeros((udim, 1))
+
+    def set_trim(self, xtrim, utrim):
+        self.xtrim = xtrim
+        self.utrim = utrim
+
+    def get(self, t, x):
+        raise NotImplementedError
+
+
+class Linear(BaseInnerCtrl):
+    def __init__(self, xdim, udim):
+        super().__init__(xdim, udim)
+        self.theta = np.zeros((xdim, udim))
+        self.noise = []
+
+    def get_param(self):
+        return self.theta
+
+    def set_param(self, theta):
+        if np.ndim(theta) == 0:
+            theta = theta * np.ones_like(self.theta)
+
+        assert np.ndim(theta) == np.ndim(self.theta)
+
+        self.theta = theta
+
+    def set_phi(self, func):
+        self.phi = func
+
+    def get(self, t, x):
+        theta = self.theta
+        return self.phi(x).T.dot(theta) + self.get_noise(t)
+
+    def get_noise(self, t):
+        res = 0
+        if self.noise:
+            for noise in self.noise:
+                res = res + noise(t)
+        return res
+
+    def add_noise(self, noise):
+        self.noise.append(noise)
 
 
 class Agent(core.BaseEnv):
-    def __init__(self, w1, w2, w3, eta=1e-2, R=1):
+    def __init__(self, w1, w2, w3, eta=1e3, R=1):
         super().__init__()
         self.w1 = core.BaseSystem(w1)
         self.w2 = core.BaseSystem(w2)
@@ -24,6 +77,9 @@ class Agent(core.BaseEnv):
 
     def get(self, t, x):
         return self.phi2(x).T.dot(self.w2.state)
+
+    def get_param(self):
+        return self.w2.state.copy()
 
     def set_dot(self, x, u):
         w1, w2, w3 = self.w1.state, self.w2.state, self.w3.state
@@ -74,18 +130,43 @@ class F16Dof3(Base):
         self.main = core.BaseSystem(np.zeros(3)[:, None])
         self.get_true_parameters()
 
-        agent = Agent(
-            w1=np.zeros_like(self.true_w1),
+        self.agent = Agent(
+            w1=np.random.random(self.true_w1.shape),
             w2=np.zeros_like(self.true_w2),
-            w3=np.zeros_like(self.true_w3),
+            w3=np.random.random(self.true_w3.shape),
             R=self.R,
         )
-        self.set_inner_ctrl(agent)
+
+        behavior = Linear(xdim=3, udim=1)
+        behavior.set_phi(self.agent.phi2)
+        # ou_noise = common.OuNoise(
+        #     0, 0.5, dt=1, max_t=kwargs["max_t"], decay=kwargs["max_t"])
+        # behavior.add_noise(ou_noise)
+        # behavior.add_noise(lambda t: np.sin(t / 10))
+        self.set_inner_ctrl(behavior)
+
+        self.set_logger_callback()
+
+    def set_logger_callback(self, func=None):
+        self.logger_callback = func or self.get_info
+
+    def get_info(self, i, t, y, thist, odehist):
+        x, inner = self.observe_dict(y).values()
+        u = self.inner_ctrl.get(t, x)
+        us = self.agent.get(t, x)
+        return {
+            "time": t,
+            "state": x,
+            "action": u,
+            "target_action": us,
+            "agent_state": inner
+        }
 
     def get_true_parameters(self):
         # Construct the true Hamiltonian
         K, P = LQR.clqr(self.A, self.B, self.Q, self.R)[:2]
         XX = P.dot(self.B).dot(K)
+        XX = 2 * XX - np.diag(XX)
         w1 = XX[np.triu_indices(XX.shape[0])]
         XU = 2 * P.dot(self.B)
         w1 = np.hstack((w1, XU.T.ravel()))
@@ -95,14 +176,22 @@ class F16Dof3(Base):
         # phi2 = x1, x2, x3
         # phi3 = x1, x2, x3
         self.true_w1 = w1[:, None]
-        self.true_w2 = K.ravel()[:, None]
+        self.true_w2 = - K.ravel()[:, None]
         self.true_w3 = 4 * self.B.T.dot(P).ravel()[:, None]
+
+    def step(self):
+        self.update()
+        done = self.clock.time_over()
+        return None, None, done, None
 
     def set_dot(self, t):
         x = self.main.state
-        u = self.get_action(t, x)
-        self.main.dot = self.A.dot(x) + self.B.dot(u)
-        self.inner_ctrl.set_dot(x, u)
+
+        self.inner_ctrl.set_param(self.agent.get_param())
+        u = self.inner_ctrl.get(t, x)
+
+        self.main.dot = (self.A + 0.1 * np.eye(3)).dot(x) + self.B.dot(u)
+        self.agent.set_dot(x, u)
 
     def reset(self, mode="normal"):
         super().reset()
@@ -114,6 +203,6 @@ class F16Dof3(Base):
 
 
 if __name__ == "__main__":
-    env = F16Dof3()
+    env = F16Dof3(max_t=10)
     env.reset(mode="random")
     env.set_dot(0)

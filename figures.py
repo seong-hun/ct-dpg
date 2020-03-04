@@ -15,6 +15,47 @@ plt.rc("grid", linestyle="--", alpha=0.8)
 plt.rc("figure", figsize=[6, 4])
 
 
+def plot_online(path, **kwargs):
+    def create_canvas(col=1, row=1, labels=None, canvas=[], **kwargs):
+        fig, axes = plt.subplots(col, row, squeeze=False, **kwargs)
+        for i, index in enumerate(np.ndindex(col, row)):
+            axes[index].set_ylabel(labels[i])
+            if index[0] == col - 1:
+                axes[index].set_xlabel("time [s]")
+        canvas.append((fig, axes))
+        return canvas
+
+    data, info = logging.load(path, with_info=True)
+
+    labels = [r"$x_1$", r"$x_2$", r"$x_3$", r"$u$"]
+    canvas = create_canvas(2, 2, labels=labels)
+
+    labels = [r"$W_1$", r"$W_2$", r"$W_3$"]
+    canvas = create_canvas(3, 1, labels=labels, canvas=canvas)
+
+    time = data["time"]
+
+    fig, axes = canvas[0]
+    for ax, x in zip(axes.flat[:3], data["state"].squeeze().T):
+        ln, = ax.plot(time, x, **kwargs)
+    ax = axes.flat[3]
+    ax.plot(time, data["action"].squeeze())
+
+    fig.tight_layout()
+
+    fig, axes = canvas[1]
+    true_ws = [
+        np.tile(info[key], (len(time), 1, 1))
+        for key in ("true_w1", "true_w2", "true_w3")]
+    EST_KWARGS = dict(kwargs, c="r")
+    TRUE_KWARGS = dict(kwargs, ls="--", c="k")
+    for ax, x, y in zip(axes.flat, data["agent_state"].values(), true_ws):
+        ax.plot(time, x.squeeze(), **EST_KWARGS)
+        ax.plot(time, y.squeeze(), **TRUE_KWARGS)
+
+    fig.tight_layout()
+
+
 def plot_single(path, canvas=[], name=None, **kwargs):
     data = logging.load(path)
 
