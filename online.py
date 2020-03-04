@@ -40,6 +40,7 @@ def run(plot, seed):
     )
     env.logger.set_info(info)
 
+    print(f"Eigenvalues: {env.eigvals}")
     print(f"Runnning {expdir} ...")
 
     env.reset(mode="random")
