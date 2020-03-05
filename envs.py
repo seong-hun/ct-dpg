@@ -7,8 +7,9 @@ import fym.agents.LQR as LQR
 import common
 
 
-class BaseInnerCtrl:
+class BaseInnerCtrl(core.BaseEnv):
     def __init__(self, xdim, udim):
+        super().__init__()
         self.xtrim = np.zeros((xdim, 1))
         self.utrim = np.zeros((udim, 1))
         self.noise = []
@@ -32,33 +33,38 @@ class BaseInnerCtrl:
 
 
 class Linear(BaseInnerCtrl):
-    def __init__(self, xdim, udim):
+    def __init__(self, xdim, udim, turnon):
         super().__init__(xdim, udim)
-        self.theta = np.zeros((xdim, udim))
+        self.model = core.BaseSystem(np.zeros((xdim, udim)))
+        self.turnon = turnon
 
     def get_param(self):
-        return self.theta
+        return self.model.state.copy()
 
-    def set_param(self, theta):
-        if np.ndim(theta) == 0:
-            theta = theta * np.ones_like(self.theta)
+    def set_param(self, state):
+        if np.ndim(state) == 0:
+            state = state * np.ones_like(self.model.state)
 
-        assert np.ndim(theta) == np.ndim(self.theta)
-
-        self.theta = theta
+        assert np.ndim(state) == np.ndim(self.model.state)
+        self.model.state = state
 
     def set_phi(self, func):
         self.phi = func
 
-    def get(self, t, x):
-        theta = self.theta
-        return self.phi(x).T.dot(theta) + self.get_noise(t)
+    def get(self, t, x, state=None):
+        if state is None:
+            state = self.model.state
+
+        ut = self.phi(x).T.dot(state)
+        if t < self.turnon:
+            ut = np.zeros_like(ut) + self.get_noise(t)
+
+        return ut
 
 
-class Behavior(core.BaseEnv, BaseInnerCtrl):
+class Behavior(BaseInnerCtrl):
     def __init__(self, xdim, udim, eta2=1):
-        super().__init__()
-        BaseInnerCtrl.__init__(self, xdim, udim)
+        super().__init__(xdim, udim)
         self.model = core.BaseSystem(np.random.randn(udim, 1))
         self.eta2 = eta2
 
@@ -91,21 +97,22 @@ class Agent(core.BaseEnv):
         return self.w2.state.copy()
 
     def set_dot(self, x, u):
-        w1, w2, w3 = self.w1.state, self.w2.state, self.w3.state
-        phi1, phi2, phi3 = self.phi1(x, u), self.phi2(x), self.phi3(x)
+        w1, w2 = self.w1.state, self.w2.state
+        phi1, phi2, phi3 = self.phi1(x, u), self.phi2(x), self.phi3(x, w2)
         ut = phi2.T.dot(w2)
         udiff = u - ut
+        g = phi3.T.dot(w1)
         e = (
             phi1.T.dot(w1)
             - udiff.T.dot(self.R).dot(udiff)
-            - udiff.T.dot(phi3.T.dot(w3))
+            - udiff.T.dot(g)
         )
-        self.w1.dot = - self.eta * e * phi1
+        self.w1.dot = (
+            - self.eta * e * (phi1 - phi3.dot(udiff))
+        )
         self.w2.dot = (
-            - self.eta * e * (
-                2 * phi2.dot(self.R).dot(udiff)
-                + phi2.dot(phi3.T).dot(w3)
-            )
+            - self.eta * e * (2 * phi2.dot(self.R).dot(udiff) + phi2.dot(g))
+            - self.eta2 * phi2.dot(g - 2 * self.R.dot(ut))
         )
         self.w3.dot = self.eta * e * phi3.dot(udiff)
 
@@ -117,8 +124,8 @@ class Agent(core.BaseEnv):
     def phi2(self, x):
         return x
 
-    def phi3(self, x):
-        return x
+    def phi3(self, x, w2):
+        return np.vstack((0, 0, 0, 0, 0, 0, x, 2 * self.phi2(x).T.dot(w2)))
 
 
 class Base(core.BaseEnv):
@@ -148,7 +155,7 @@ class F16Dof3(Base):
     Q = np.diag(np.ones(3))
     R = np.diag(np.ones(1))
 
-    def __init__(self, eta=1e3, eta2=1e0, **kwargs):
+    def __init__(self, eta=1e2, eta2=0e1, turnon=50, **kwargs):
         super().__init__(**kwargs)
         self.main = core.BaseSystem(np.zeros(3)[:, None])
         self.get_true_parameters()
@@ -156,30 +163,31 @@ class F16Dof3(Base):
         self.agent = Agent(
             w1=np.zeros_like(self.true_w1),
             w2=np.zeros_like(self.true_w2),
-            w3=np.zeros_like(self.true_w3),
+            w3=np.zeros_like(self.true_w1),
             R=self.R,
             eta=eta,
             eta2=eta2,
         )
 
-        behavior = Behavior(xdim=3, udim=1, eta2=eta2)
+        behavior = Linear(xdim=3, udim=1, turnon=turnon)
+        behavior.set_phi(self.agent.phi2)
         noise = common.OuNoise(
-            0, 0.2, dt=1, max_t=kwargs["max_t"], decay=0.5 * kwargs["max_t"])
+            0, 0.7, dt=1, max_t=kwargs["max_t"], decay=kwargs["max_t"])
         behavior.add_noise(noise)
         self.set_inner_ctrl(behavior)
 
         self.set_logger_callback()
 
-        self.A = self.A + 0.3 * np.eye(3)
+        self.A = self.A + 0.2 * np.eye(3)
         self.eigvals = np.linalg.eigvals(self.A)
 
     def set_logger_callback(self, func=None):
         self.logger_callback = func or self.get_info
 
     def get_info(self, i, t, y, thist, odehist):
-        x, agent, behavior = self.observe_dict(y).values()
+        x, agent, inner_ctrl = self.observe_dict(y).values()
         ut = self.agent.get(t, x, agent["w2"])
-        u = self.inner_ctrl.get(t, x, behavior["model"])
+        u = self.inner_ctrl.get(t, x, agent["w2"])
         return {
             "time": t,
             "state": x,
@@ -187,6 +195,28 @@ class F16Dof3(Base):
             "target_action": ut,
             "agent_state": agent
         }
+
+    def step(self):
+        self.update()
+        done = self.clock.time_over()
+        return None, None, done, None
+
+    def set_dot(self, t):
+        x = self.main.state
+
+        u = self.inner_ctrl.get(t, x, self.agent.get_param())
+
+        self.main.dot = self.A.dot(x) + self.B.dot(u)
+        self.agent.set_dot(x, u)
+        self.inner_ctrl.dot = np.zeros_like(self.inner_ctrl.state)
+
+    def reset(self, mode="normal"):
+        super().reset()
+        if mode == "random":
+            self.main.initial_state = (
+                self.main.initial_state
+                + np.random.randn(*self.main.state_shape)
+            )
 
     def get_true_parameters(self):
         # Construct the true Hamiltonian
@@ -204,30 +234,6 @@ class F16Dof3(Base):
         self.true_w1 = w1[:, None]
         self.true_w2 = - K.ravel()[:, None]
         self.true_w3 = 4 * self.B.T.dot(P).ravel()[:, None]
-
-    def step(self):
-        self.update()
-        done = self.clock.time_over()
-        return None, None, done, None
-
-    def set_dot(self, t):
-        x = self.main.state
-
-        # self.inner_ctrl.set_param(self.agent.get_param())
-        u = self.inner_ctrl.get(t, x)
-        ut = self.agent.get(t, x)
-
-        self.main.dot = self.A.dot(x) + self.B.dot(u)
-        self.agent.set_dot(x, u)
-        self.inner_ctrl.set_dot(t, x, ut)
-
-    def reset(self, mode="normal"):
-        super().reset()
-        if mode == "random":
-            self.main.initial_state = (
-                self.main.initial_state
-                + np.random.randn(*self.main.state_shape)
-            )
 
 
 if __name__ == "__main__":

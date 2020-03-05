@@ -24,11 +24,15 @@ def main():
 @main.command()
 @click.option("--plot", "-p", is_flag=True)
 @click.option("--seed", default=1, type=int)
-def run(plot, seed):
+@click.option("--turnon", default=60)
+@click.option("--maxt", default=150)
+def run(plot, seed, **kwargs):
     np.random.seed(seed)
 
     expdir = os.path.join("data", "F16Dof3")
-    envparams = dict(dt=30, max_t=100, solver="odeint", ode_step_len=3000)
+    envparams = dict(turnon=kwargs["turnon"],
+                     dt=30, max_t=kwargs["maxt"],
+                     solver="odeint", ode_step_len=3000)
     envparams["logging_path"] = os.path.join(expdir, "run.h5")
     env = envs.F16Dof3(**envparams)
 
