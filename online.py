@@ -24,8 +24,8 @@ def main():
 @main.command()
 @click.option("--plot", "-p", is_flag=True)
 @click.option("--seed", default=1, type=int)
-@click.option("--turnon", default=60)
-@click.option("--maxt", default=150)
+@click.option("--turnon", default=200)
+@click.option("--maxt", default=250)
 def run(plot, seed, **kwargs):
     np.random.seed(seed)
 
@@ -40,11 +40,9 @@ def run(plot, seed, **kwargs):
         envparams=envparams,
         true_w1=env.true_w1,
         true_w2=env.true_w2,
-        true_w3=env.true_w3,
     )
     env.logger.set_info(info)
 
-    print(f"Eigenvalues: {env.eigvals}")
     print(f"Runnning {expdir} ...")
 
     env.reset(mode="random")

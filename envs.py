@@ -79,11 +79,10 @@ class Behavior(BaseInnerCtrl):
 
 
 class Agent(core.BaseEnv):
-    def __init__(self, w1, w2, w3, eta=1e3, eta2=1e-1, R=1):
+    def __init__(self, w1, w2, eta=1e3, eta2=1e-1, R=1):
         super().__init__()
         self.w1 = core.BaseSystem(w1)
         self.w2 = core.BaseSystem(w2)
-        self.w3 = core.BaseSystem(w3)
         self.R = R
         self.eta = eta
         self.eta2 = eta2
@@ -112,9 +111,7 @@ class Agent(core.BaseEnv):
         )
         self.w2.dot = (
             - self.eta * e * (2 * phi2.dot(self.R).dot(udiff) + phi2.dot(g))
-            - self.eta2 * phi2.dot(g - 2 * self.R.dot(ut))
         )
-        self.w3.dot = self.eta * e * phi3.dot(udiff)
 
     def phi1(self, x, u):
         # x1**2, x1*x2, x1*x3, x2**2, x2*X3, x3**2, x1*u, x2*u, x3*u, u**2
@@ -163,7 +160,6 @@ class F16Dof3(Base):
         self.agent = Agent(
             w1=np.zeros_like(self.true_w1),
             w2=np.zeros_like(self.true_w2),
-            w3=np.zeros_like(self.true_w1),
             R=self.R,
             eta=eta,
             eta2=eta2,
@@ -177,9 +173,6 @@ class F16Dof3(Base):
         self.set_inner_ctrl(behavior)
 
         self.set_logger_callback()
-
-        self.A = self.A + 0.2 * np.eye(3)
-        self.eigvals = np.linalg.eigvals(self.A)
 
     def set_logger_callback(self, func=None):
         self.logger_callback = func or self.get_info
@@ -233,7 +226,6 @@ class F16Dof3(Base):
         # phi3 = x1, x2, x3
         self.true_w1 = w1[:, None]
         self.true_w2 = - K.ravel()[:, None]
-        self.true_w3 = 4 * self.B.T.dot(P).ravel()[:, None]
 
 
 if __name__ == "__main__":

@@ -30,8 +30,8 @@ def plot_online(path, **kwargs):
     labels = [r"$x_1$", r"$x_2$", r"$x_3$", r"$u$"]
     canvas = create_canvas(2, 2, labels=labels)
 
-    labels = [r"$W_1$", r"$W_2$", r"$W_3$"]
-    canvas = create_canvas(3, 1, labels=labels, canvas=canvas)
+    labels = [r"$W_1$", r"$W_2$"]
+    canvas = create_canvas(2, 1, labels=labels, canvas=canvas)
 
     time = data["time"]
 
@@ -46,7 +46,7 @@ def plot_online(path, **kwargs):
     fig, axes = canvas[1]
     true_ws = [
         np.tile(info[key], (len(time), 1, 1))
-        for key in ("true_w1", "true_w2", "true_w3")]
+        for key in ("true_w1", "true_w2")]
     EST_KWARGS = dict(kwargs, c="r")
     TRUE_KWARGS = dict(kwargs, ls="--", c="k")
     for ax, x, y in zip(axes.flat, data["agent_state"].values(), true_ws):
