@@ -78,14 +78,35 @@ class Behavior(BaseInnerCtrl):
         self.model.dot = - self.eta2 * udiff + self.get_noise(t)
 
 
-class Agent(core.BaseEnv):
-    def __init__(self, w1, w2, eta=1e3, eta2=1e-1, R=1):
+class WSystem(core.BaseEnv):
+    def __init__(self, x_size, u_size, get_all_basis):
         super().__init__()
-        self.w1 = core.BaseSystem(w1)
-        self.w2 = core.BaseSystem(w2)
+
+        x = np.zeros((x_size, 1))
+        u = np.zeros((u_size, 1))
+        basis = get_all_basis(x, u)
+        self.w1 = core.BaseSystem(np.zeros_like(basis[0]))
+        self.w2 = core.BaseSystem(np.zeros_like(basis[1]))
+        self.w3 = core.BaseSystem(np.zeros_like(basis[2]))
+        self.w2p = core.BaseSystem(np.zeros_like(basis[3]))
+        self.w3p = core.BaseSystem(np.zeros_like(basis[4]))
+
+
+class Agent(core.BaseEnv):
+    def __init__(self, x_size, u_size, k, theta, eta1=1e3, eta2=1e-1, R=1):
+        super().__init__()
+
         self.R = R
-        self.eta = eta
+        self.k = k
+        self.kdiff = np.diff(self.k)
+        self.theta = theta
+        self.eta1 = eta1
         self.eta2 = eta2
+
+        self.wsys = WSystem(x_size, u_size, self.get_all_basis)
+        shape = self.wsys.state[:, None].shape
+        self.M = core.BaseSystem(np.zeros((shape[0], shape[0])))
+        self.N = core.BaseSystem(np.zeros(shape))
 
     def get(self, t, x, w2=None):
         if w2 is None:
@@ -93,25 +114,59 @@ class Agent(core.BaseEnv):
         return self.phi2(x).T.dot(w2)
 
     def get_param(self):
-        return self.w2.state.copy()
+        return self.wsys.w2.state.copy()
 
-    def set_dot(self, x, u):
-        w1, w2 = self.w1.state, self.w2.state
-        phi1, phi2, phi3 = self.phi1(x, u), self.phi2(x), self.phi3(x, w2)
-        ut = phi2.T.dot(w2)
-        udiff = u - ut
-        g = phi3.T.dot(w1)
-        e = (
-            phi1.T.dot(w1)
-            - udiff.T.dot(self.R).dot(udiff)
-            - udiff.T.dot(g)
+    def get_k(self, e):
+        return self.k[0] + self.kdiff * np.tanh(self.theta * np.abs(e))
+
+    def set_dot(self, t, x, u):
+        M, N = self.M.state, self.N.state
+
+        w = self.wsys.state[:, None]
+        basis = np.vstack(self.get_all_basis(x, u))
+        y = u.T.dot(self.R).dot(u)
+        e = basis.T.dot(w) - y
+
+        if t == 0:
+            self.ta, self.Ma, self.Na = t, M, N
+        elif t > self.ta:
+            if get_eigvals(M).min() >= get_eigvals(self.Ma).min():
+                self.ta, self.Ma, self.Na = t, M, N
+
+        k = self.get_k(e)
+        Ma, Na = self.Ma, self.Na
+
+        wdot = -self.eta1 * e * basis - self.eta2 * (Ma.dot(w) - Na)
+        self.wsys.dot = wdot.ravel()
+
+        # Additional
+        _, w2, w3, w2p, w3p = self.wsys.observe_list()
+        phi3 = self.phi3(x)
+        e2 = np.kron(w2, w2) - w2p
+        e3 = np.kron(w2, w3) - w3p
+
+        self.wsys.w2.dot += -self.eta1 * (
+            np.kron(np.eye(w2.size), w2).T.dot(e2)
         )
-        self.w1.dot = (
-            - self.eta * e * (phi1 - phi3.dot(udiff))
+        self.wsys.w2p.dot += self.eta1 * (
+            np.eye(w2p.size).dot(e2)
         )
-        self.w2.dot = (
-            - self.eta * e * (2 * phi2.dot(self.R).dot(udiff) + phi2.dot(g))
+
+        self.wsys.w2.dot += -self.eta1 * (
+            np.kron(np.eye(w2.size), w3).T.dot(e3)
         )
+        self.wsys.w3.dot += -self.eta1 * (
+            np.kron(w2, np.eye(w3.size)).T.dot(e3)
+        )
+        self.wsys.w3p.dot += self.eta1 * (
+            np.eye(w3p.size).dot(e3)
+        )
+
+        self.wsys.w3.dot += -self.eta1 * phi3.dot(phi3.T).dot(w3)
+
+        norm = basis.T.dot(basis) + 1
+        self.M.dot = - k * M + basis.dot(basis.T) / norm
+        self.N.dot = - k * N + basis.dot(y.T) / norm
 
     def phi1(self, x, u):
         # x1**2, x1*x2, x1*x3, x2**2, x2*X3, x3**2, x1*u, x2*u, x3*u, u**2
@@ -121,8 +176,20 @@ class Agent(core.BaseEnv):
     def phi2(self, x):
         return x
 
-    def phi3(self, x, w2):
-        return np.vstack((0, 0, 0, 0, 0, 0, x, 2 * self.phi2(x).T.dot(w2)))
+    def phi3(self, x):
+        return x
+
+    def get_all_basis(self, x, u):
+        phi2 = self.phi2(x)
+        phi3 = self.phi3(x)
+        R = self.R
+        return (
+            self.phi1(x, u),
+            2 * phi2.dot(R).dot(u),
+            -phi3.dot(u),
+            vec(phi2.dot(R).dot(phi2.T)),
+            vec(phi2.dot(phi3.T))
+        )
 
 
 class Base(core.BaseEnv):
@@ -152,24 +219,23 @@ class F16Dof3(Base):
     Q = np.diag(np.ones(3))
     R = np.diag(np.ones(1))
 
-    def __init__(self, eta=1e2, eta2=0e1, turnon=50, **kwargs):
+    def __init__(self, eta1=1e1, eta2=0e1, k=(0.1, 10), theta=0.1,
+                 turnon=50, **kwargs):
         super().__init__(**kwargs)
         self.main = core.BaseSystem(np.zeros(3)[:, None])
         self.get_true_parameters()
 
         self.agent = Agent(
-            w1=np.zeros_like(self.true_w1),
-            w2=np.zeros_like(self.true_w2),
-            R=self.R,
-            eta=eta,
-            eta2=eta2,
+            x_size=3, u_size=1, k=k, theta=theta, R=self.R,
+            eta1=eta1, eta2=eta2,
         )
 
         behavior = Linear(xdim=3, udim=1, turnon=turnon)
         behavior.set_phi(self.agent.phi2)
         noise = common.OuNoise(
-            0, 0.7, dt=1, max_t=kwargs["max_t"], decay=kwargs["max_t"])
+            0, 0.5, dt=0.5, max_t=kwargs["max_t"], decay=kwargs["max_t"])
         behavior.add_noise(noise)
+        behavior.add_noise(lambda t: np.sin(t) + np.cos(1.3*t))
         self.set_inner_ctrl(behavior)
 
         self.set_logger_callback()
@@ -179,8 +245,9 @@ class F16Dof3(Base):
 
     def get_info(self, i, t, y, thist, odehist):
         x, agent, inner_ctrl = self.observe_dict(y).values()
-        ut = self.agent.get(t, x, agent["w2"])
-        u = self.inner_ctrl.get(t, x, agent["w2"])
+        w2 = agent["wsys"]["w2"]
+        ut = self.agent.get(t, x, w2)
+        u = self.inner_ctrl.get(t, x, w2)
         return {
             "time": t,
             "state": x,
@@ -200,7 +267,7 @@ class F16Dof3(Base):
         u = self.inner_ctrl.get(t, x, self.agent.get_param())
 
         self.main.dot = self.A.dot(x) + self.B.dot(u)
-        self.agent.set_dot(x, u)
+        self.agent.set_dot(t, x, u)
         self.inner_ctrl.dot = np.zeros_like(self.inner_ctrl.state)
 
     def reset(self, mode="normal"):
@@ -221,11 +288,18 @@ class F16Dof3(Base):
         w1 = np.hstack((w1, XU.T.ravel()))
         w1 = np.hstack((w1, self.R[np.triu_indices(self.R.shape[0])]))
 
-        # phi1 = x1**2, x1*x2, x1*x3, x2**2, x2*X3, x3**2, x1*u, x2*u, x3*u, u**2
-        # phi2 = x1, x2, x3
-        # phi3 = x1, x2, x3
         self.true_w1 = w1[:, None]
         self.true_w2 = - K.ravel()[:, None]
+
+
+def vec(X):
+    return X.reshape(-1, 1, order="F")
+
+
+def get_eigvals(M):
+    eigvals = np.linalg.eigvals(M)
+    eigvals[np.isclose(eigvals, 0)] = 0
+    return eigvals
 
 
 if __name__ == "__main__":

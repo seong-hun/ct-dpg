@@ -38,8 +38,10 @@ def plot_online(path, **kwargs):
     fig, axes = canvas[0]
     for ax, x in zip(axes.flat[:3], data["state"].squeeze().T):
         ln, = ax.plot(time, x, **kwargs)
+
     ax = axes.flat[3]
     ax.plot(time, data["action"].squeeze())
+    ax.plot(time, data["target_action"].squeeze(), c="b")
 
     fig.tight_layout()
 
@@ -47,11 +49,14 @@ def plot_online(path, **kwargs):
     true_ws = [
         np.tile(info[key], (len(time), 1, 1))
         for key in ("true_w1", "true_w2")]
+    ws = [
+        data["agent_state"]["wsys"][key]
+        for key in ("w1", "w2")]
     EST_KWARGS = dict(kwargs, c="r")
     TRUE_KWARGS = dict(kwargs, ls="--", c="k")
-    for ax, x, y in zip(axes.flat, data["agent_state"].values(), true_ws):
-        ax.plot(time, x.squeeze(), **EST_KWARGS)
-        ax.plot(time, y.squeeze(), **TRUE_KWARGS)
+    for ax, x, y in zip(axes.flat, ws, true_ws):
+        ax.plot(time, x.reshape(-1, np.prod(x.shape[1:])), **EST_KWARGS)
+        ax.plot(time, y.reshape(-1, np.prod(y.shape[1:])), **TRUE_KWARGS)
 
     fig.tight_layout()
 
