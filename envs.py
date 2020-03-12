@@ -41,41 +41,25 @@ class Linear(BaseInnerCtrl):
     def get_param(self):
         return self.model.state.copy()
 
-    def set_param(self, state):
-        if np.ndim(state) == 0:
-            state = state * np.ones_like(self.model.state)
+    def set_param(self, w):
+        if np.ndim(w) == 0:
+            w = w * np.ones_like(self.model.state)
 
-        assert np.ndim(state) == np.ndim(self.model.state)
-        self.model.state = state
+        assert np.ndim(w) == np.ndim(self.model.state)
+        self.model.state = w
 
     def set_phi(self, func):
         self.phi = func
 
-    def get(self, t, x, state=None):
-        if state is None:
-            state = self.model.state
+    def get(self, t, x, w=None):
+        if w is None:
+            w = self.model.state
 
-        ut = self.phi(x).T.dot(state)
+        ut = self.phi(x).T.dot(w)
         if t < self.turnon:
-            ut = np.zeros_like(ut) + self.get_noise(t)
+            ut += self.get_noise(t)
 
         return ut
-
-
-class Behavior(BaseInnerCtrl):
-    def __init__(self, xdim, udim, eta2=1):
-        super().__init__(xdim, udim)
-        self.model = core.BaseSystem(np.random.randn(udim, 1))
-        self.eta2 = eta2
-
-    def get(self, t, x, u=None):
-        if u is None:
-            u = self.model.state
-        return u
-
-    def set_dot(self, t, x, ut):
-        udiff = self.model.state - ut
-        self.model.dot = - self.eta2 * udiff + self.get_noise(t)
 
 
 class Critic(core.BaseEnv):
@@ -117,7 +101,7 @@ class Agent(core.BaseEnv):
     Q = np.diag(np.ones(3))
     R = np.diag(np.ones(1))
 
-    def __init__(self, x_size, u_size, k, theta, eta1=1e3, eta2=1e-1):
+    def __init__(self, x_size, u_size, k, theta, eta1, eta2, eta3):
         super().__init__()
 
         self.k = k
@@ -125,6 +109,7 @@ class Agent(core.BaseEnv):
         self.theta = theta
         self.eta1 = eta1
         self.eta2 = eta2
+        self.eta3 = eta3
 
         self.critic = Critic(x_size, u_size)
         self.actor = Actor(x_size, u_size)
@@ -165,9 +150,10 @@ class Agent(core.BaseEnv):
 
         y = (r - rpi - (u - pi).T.dot(gradr))
         ec = w1.T.dot(basis1) - y
-        self.critic.w.dot = -self.eta1 * ec * basis1 / (basis1.T.dot(basis1) + 1)
+        norm = basis1.T.dot(basis1) + 1e-3
+        self.critic.w.dot = -self.eta1 * ec * basis1 / norm
         # self.critic.w.dot += -self.eta * 1
-        self.actor.w.dot = -self.eta2 * basis2.dot(grad_phi1).dot(w1)
+        self.actor.w.dot = -self.eta1 * ec * basis2.dot(grad_phi1).dot(w1) / norm
         # self.actor.w.dot += -self.eta1 * ec * grad_phi1.dot(w1)
 
         if t == 0:
@@ -187,9 +173,8 @@ class Agent(core.BaseEnv):
         k = self.get_k(ec)
         Ma, Na = self.Ma, self.Na
 
-        self.critic.w.dot += -(Ma.dot(w1) - Na)
+        self.critic.w.dot += -self.eta3 * (Ma.dot(w1) - Na) * 0
 
-        norm = basis1.T.dot(basis1) + 1
         self.M.dot = - k * M + basis1.dot(basis1.T) / norm
         self.N.dot = - k * N + basis1.dot(y.T) / norm
 
@@ -228,14 +213,14 @@ class F16Dof3(Base):
         [0, 0, -1]])
     B = np.array([[0], [0], [1]])
 
-    def __init__(self, eta1, eta2, k, theta,
+    def __init__(self, eta1, eta2, eta3, k, theta,
                  noise_mean, noise_std, noise_dt,
                  turnon, **kwargs):
         super().__init__(**kwargs)
         self.main = core.BaseSystem(np.zeros(3)[:, None])
         self.agent = Agent(
             x_size=3, u_size=1, k=k, theta=theta,
-            eta1=eta1, eta2=eta2,
+            eta1=eta1, eta2=eta2, eta3=eta3,
         )
 
         self.turnon = turnon
@@ -244,21 +229,24 @@ class F16Dof3(Base):
             (6, np.array([0.5, 1, -0.5])[:, None]),
             (9, np.array([-1, 0.5, 1])[:, None]),
             (13, np.array([2, 1.5, -1.5])[:, None]),
-            # (18, np.array([1, 0, 0.5])[:, None]),
+            # (18, np.array([1, 1, 1.0])[:, None]),
+            (40, np.array([-1, -1, -1.0])[:, None]),
+            (70, np.array([1, 0.5, 1.0])[:, None]),
         ]
 
         self.get_true_parameters()
 
         behavior = Linear(xdim=3, udim=1, turnon=turnon)
         behavior.set_phi(self.agent.actor.basis)
-        noise = common.OuNoise(
-            noise_mean, noise_std, dt=noise_dt,
-            max_t=kwargs["max_t"], decay=kwargs["max_t"])
-        behavior.add_noise(noise)
-        behavior.add_noise(lambda t: (
+        # noise = common.OuNoise(
+        #     noise_mean, noise_std, dt=noise_dt,
+        #     max_t=kwargs["max_t"], decay=kwargs["max_t"])
+        # behavior.add_noise(noise)
+        behavior.add_noise(lambda t: np.exp(-t/20) * (
             0.4 * np.sin(2 * t) * (1 + 0.2 * np.cos(1.3 * t))
             + np.cos(2.5 * t + 0.1)
             - np.cos(0.5 * t + 0.12)
+            - 1.3 * np.sin(0.05 * t)
         ))
         self.set_inner_ctrl(behavior)
 

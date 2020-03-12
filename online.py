@@ -23,16 +23,16 @@ def main():
 
 @main.command()
 @click.option("--plot", "-p", is_flag=True)
-@click.option("--seed", default=1, type=int)
-@click.option("--turnon", "-t", default=10)
-@click.option("--max-t", default=15)
+@click.option("--seed", default=2, type=int)
+@click.option("--turnon", "-t", default=50)
+@click.option("--max-t", default=60)
 @click.option("--dt", default=0.001)
 def run(plot, seed, **kwargs):
     np.random.seed(seed)
 
     expdir = os.path.join("data", "F16Dof3")
-    envparams = dict(eta1=1e3, eta2=1e2, k=(1e-1, 1e0), theta=100,
-                     noise_mean=0, noise_std=0.7, noise_dt=0.1,
+    envparams = dict(eta1=1e2, eta2=1e2, eta3=1e2, k=(1e-2, 1e-1), theta=100,
+                     noise_mean=0, noise_std=0.3, noise_dt=0.1,
                      turnon=kwargs["turnon"],
                      dt=kwargs["dt"], max_t=kwargs["max_t"],
                      solver="rk4")
