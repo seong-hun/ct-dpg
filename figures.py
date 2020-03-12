@@ -27,11 +27,17 @@ def plot_online(path, **kwargs):
 
     data, info = logging.load(path, with_info=True)
 
+    import envs
+    info["envparams"]["logging_off"] = True
+    env = envs.F16Dof3(**info["envparams"])
     labels = [r"$x_1$", r"$x_2$", r"$x_3$", r"$u$"]
     canvas = create_canvas(2, 2, labels=labels)
 
     labels = [r"$W_1$", r"$W_2$"]
     canvas = create_canvas(2, 1, labels=labels, canvas=canvas)
+
+    labels = ["Eigenvalue"]
+    canvas = create_canvas(1, 1, labels=labels, canvas=canvas)
 
     time = data["time"]
 
@@ -46,17 +52,21 @@ def plot_online(path, **kwargs):
     fig.tight_layout()
 
     fig, axes = canvas[1]
-    true_ws = [
-        np.tile(info[key], (len(time), 1, 1))
-        for key in ("true_w1", "true_w2")]
-    ws = [
-        data["agent_state"]["wsys"][key]
-        for key in ("w1", "w2")]
+    true_ws = [np.tile(_true_ws, (len(time), 1, 1))
+               for _true_ws in (env.true_w1, env.true_w2)]
+    ws = (data["critic_state"], data["actor_state"])
     EST_KWARGS = dict(kwargs, c="r")
     TRUE_KWARGS = dict(kwargs, ls="--", c="k")
     for ax, x, y in zip(axes.flat, ws, true_ws):
         ax.plot(time, x.reshape(-1, np.prod(x.shape[1:])), **EST_KWARGS)
         ax.plot(time, y.reshape(-1, np.prod(y.shape[1:])), **TRUE_KWARGS)
+
+    fig.tight_layout()
+
+    fig, axes = canvas[2]
+    ax = axes[0, 0]
+    ax.plot(time, data["eigM_min"], "k")
+    ax.plot(time, data["eigMa_min"], "r")
 
     fig.tight_layout()
 

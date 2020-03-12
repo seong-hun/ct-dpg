@@ -31,7 +31,8 @@ def run(plot, seed, **kwargs):
     np.random.seed(seed)
 
     expdir = os.path.join("data", "F16Dof3")
-    envparams = dict(eta1=1e2, eta2=1e2, k=(0.1, 10), theta=10,
+    envparams = dict(eta1=1e3, eta2=1e2, k=(1e-1, 1e0), theta=100,
+                     noise_mean=0, noise_std=0.7, noise_dt=0.1,
                      turnon=kwargs["turnon"],
                      dt=kwargs["dt"], max_t=kwargs["max_t"],
                      solver="rk4")
