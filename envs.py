@@ -235,6 +235,12 @@ class F16Dof3(Base):
         ]
 
         self.get_true_parameters()
+        Ac = self.A + self.B.dot(self.agent.actor.w.state.T)
+        maxeig = get_eigvals(Ac, reduce=False, symmetric=False).real.max()
+        if maxeig >= 0:
+            raise ValueError(f"the initial policy is unstable - {maxeig:5.2f}")
+        else:
+            print(f"Initial policy: {maxeig:5.2f}")
 
         behavior = Linear(xdim=3, udim=1, turnon=turnon)
         behavior.set_phi(self.agent.actor.basis)
@@ -305,7 +311,9 @@ class F16Dof3(Base):
         Q = self.agent.Q
         R = self.agent.R
         K, P = LQR.clqr(self.A, self.B, Q, R)[:2]
+        breakpoint()
         XX = K.T.dot(R).dot(K)
+        XX = 2 * XX - np.diag(np.diag(XX))
         w1 = XX[np.triu_indices(XX.shape[0])]
         XU = 2 * K.T.dot(R)
         w1 = np.hstack((w1, XU.T.ravel()))
