@@ -14,12 +14,6 @@ import fym.core as core
 import fym.logging as logging
 
 
-def phia(x):
-    x1, x2 = x
-    # return np.atleast_2d(x2 * (np.cos(2 * x1) + 2))
-    return np.vstack((x2 * np.cos(2 * x1), x2))
-
-
 class Linear(core.BaseSystem):
     """ u = Phi(x)^T w """
     def __init__(self, w, phi):
@@ -61,7 +55,7 @@ def lewis_noise(t, noisescale):
 
 
 class Env(core.BaseEnv):
-    def __init__(self, paramvar=0.3, noisescale=0.8):
+    def __init__(self, phia, paramvar=0.3, noisescale=0.8):
         super().__init__(dt=0.01, max_t=5)
         self.main = core.BaseSystem(np.zeros((2, 1)))
         self.inner_ctrl = Linear(-np.array([[1, 2]]).T, phi=phia)
@@ -115,8 +109,9 @@ class RADP(core.BaseEnv):
     Q = np.eye(2)
     R = np.ones((1, 1))
 
-    def __init__(self, x_size, u_size, T):
+    def __init__(self, x_size, u_size, phia, T):
         super().__init__()
+        self.phia = phia
         self.vphia = np.vectorize(self.phia, signature="(n,1)->(p,m)")
         self.vphic = np.vectorize(self.phia, signature="(n,1)->(p,1)")
         self.vcost = np.vectorize(self.cost, signature="(n,1),(m,1)->()")
@@ -195,9 +190,6 @@ class RADP(core.BaseEnv):
 
         return indexlist
 
-    def phia(self, x):
-        return phia(x)
-
     def phic(self, x):
         return np.vstack((x ** 2, x[0] * x[1]))
 
@@ -266,10 +258,14 @@ def train():
     print("======")
     casedir = os.path.join("data", "case1")
 
+    def phia(x):
+        x1, x2 = x
+        return np.vstack((x2 * np.cos(2 * x1), x2))
+
     envargs = np.random.rand(10, 2)
 
     for paramvar, noisescale in tqdm(envargs):
-        env = Env(paramvar, noisescale)
+        env = Env(phia, paramvar, noisescale)
         env.set_envdir(casedir)
         _sample(env, 20)
 
@@ -277,7 +273,7 @@ def train():
         samplelist = sorted(glob(os.path.join(env.envdir, "sample-*.h5")))
         datalist = [logging.load(path) for path in samplelist]
 
-        agent = RADP(2, 1, 0.05)
+        agent = RADP(2, 1, phia, 0.05)
         agent.set_datalist(datalist)
         agent.set_trainpath(env.envdir)
         _train(agent)
@@ -288,7 +284,7 @@ def train():
     casedir = os.path.join("data", "case2")
 
     paramvar, noisescale = np.random.rand(2)
-    env = Env(paramvar, noisescale)
+    env = Env(phia, paramvar, noisescale)
     env.set_envdir(casedir)
     _sample(env, 20, tqdm=True)
 
@@ -296,7 +292,31 @@ def train():
     datalist = [logging.load(path) for path in samplelist]
 
     Tlist = [0.05, 0.5, 2]
-    agentlist = [RADP(2, 1, T) for T in Tlist]
+    agentlist = [RADP(2, 1, phia, T) for T in Tlist]
+
+    for agent in tqdm(agentlist):
+        agent.set_datalist(datalist)
+        agent.set_trainpath(env.envdir)
+        _train(agent)
+
+    # Case 3 - Inaccurate basis function
+    print("Case 3")
+    print("======")
+    casedir = os.path.join("data", "case3")
+
+    def phia(x):
+        return x
+
+    paramvar, noisescale = np.random.rand(2)
+    env = Env(phia, paramvar, noisescale)
+    env.set_envdir(casedir)
+    _sample(env, 20, tqdm=True)
+
+    samplelist = sorted(glob(os.path.join(env.envdir, "sample-*.h5")))
+    datalist = [logging.load(path) for path in samplelist]
+
+    Tlist = [0.05, 0.5, 2]
+    agentlist = [RADP(2, 1, phia, T) for T in Tlist]
 
     for agent in tqdm(agentlist):
         agent.set_datalist(datalist)
@@ -366,6 +386,41 @@ def plot():
 
     # Case 2
     casedir = os.path.join("data", "case2")
+    trainlist = sorted(glob(os.path.join(casedir, "*", "train-*.h5")))
+
+    custom_cycler = (
+        cycler(color=["k"])
+        * cycler(ls=["-", "--", "-.", ":"])
+    )
+
+    fig, axes = plt.subplots(2, 1, sharex=True)
+    draw_true(axes)
+
+    legendlines = []
+    for trainpath, cc in zip(trainlist, custom_cycler):
+        data, info = logging.load(trainpath, with_info=True)
+        if info["classname"] == "RADP":
+            label = rf"RADP ($T = {info['T']}$)"
+        epoch = data["epoch"]
+        wa = data["params"]["wa"].squeeze()
+        wc = data["params"]["wc"].squeeze()
+
+        lines = axes[0].plot(epoch, wc, **cc, label=label)
+        legendlines.append(lines[0])
+        axes[1].plot(epoch, wa, **cc)
+
+    fig.legend(
+        handles=legendlines,
+        bbox_to_anchor=(0.1, 0.92, 0.8, .05),
+        loc='lower center',
+        ncol=3,
+        mode="expand",
+        borderaxespad=0.
+    )
+    set_axes(fig, axes)
+
+    # Case 3
+    casedir = os.path.join("data", "case3")
     trainlist = sorted(glob(os.path.join(casedir, "*", "train-*.h5")))
 
     custom_cycler = (
