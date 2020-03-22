@@ -326,19 +326,23 @@ class NDRADP(IFRADP):
     """Numerical Differentiator RADP"""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.vgrad_phic = np.vectorize(
+            self.grad_phic, signature="(n,1)->(n,p)")
 
     def processing(self, data, wa):
         t = data["time"]
         x = data["state"]
         u = data["control"]
+        phicf = data["filter"]["phic"]
         vphia = self.vphia(x)
         vphic = self.vphic(x)
         ui = vphia.transpose(0, 2, 1).dot(wa)
         phia = 2 * np.einsum("bpm,bmo->bpo", vphia.dot(self.R), u - ui)
-        phic = np.vstack([
-            np.gradient(v, t)
-            for v in vphic.squeeze().T
-        ]).T[..., None]
+        phic = self.k * (vphic - phicf)
+        # phic = np.vstack([
+        #     np.gradient(v, t)
+        #     for v in vphic.squeeze().T
+        # ]).T[..., None]
         y = -self.vcost(x, ui)
 
         philist = []
@@ -349,6 +353,9 @@ class NDRADP(IFRADP):
             ylist.append(y[i])
 
         return philist, ylist
+
+    def grad_phic(self, x):
+        return np.hstack((2 * np.diag(x.ravel()), np.flip(x)))
 
 
 def _sample(env, num, tqdm=False):
