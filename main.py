@@ -37,7 +37,7 @@ class Linear(core.BaseSystem):
     def get(self, t, x, w=None):
         if w is None:
             w = self.state
-        ut = self.phi(x).T.dot(w)
+        ut = np.atleast_2d(self.phi(x).T.dot(w))
         ut += self.get_noise(t)
         return ut
 
@@ -55,12 +55,30 @@ def lewis_noise(t, noisescale):
 
 
 class Env(core.BaseEnv):
-    def __init__(self, phia, paramvar=0.3, noisescale=0.8, k=20):
-        super().__init__(dt=0.01, max_t=5)
+    Q = np.eye(2)
+    R = np.ones((1, 1))
+
+    def __init__(self, paramvar=0.3, noisescale=0.8, k=1e2,
+                 phia=None, phic=None):
+        super().__init__(dt=1e-2, max_t=5)
+
+        self.phia = phia or self.phia
+        self.phic = phic or self.phic
+
         self.main = core.BaseSystem(np.zeros((2, 1)))
-        self.inner_ctrl = Linear(-np.array([[1, 2]]).T, phi=phia)
+        self.inner_ctrl = Linear(-np.array([[1, 2]]).T, phi=self.phia)
         self.inner_ctrl.add_noise(partial(lewis_noise, noisescale=noisescale))
-        self.filter = core.BaseSystem(np.zeros((2, 1)))
+
+        x = np.zeros((2, 1))
+        u = np.zeros((1, 1))
+
+        phic, q, prp, pru = self.get_filter_inputs(x, u)
+        self.filter = core.Sequential(
+            phic=core.BaseSystem(phic),
+            q=core.BaseSystem(q),
+            prp=core.BaseSystem(prp),
+            pru=core.BaseSystem(pru)
+        )
 
         self.paramvar = paramvar
         self.k = k
@@ -76,15 +94,23 @@ class Env(core.BaseEnv):
                 self.inner_ctrl.state
                 + self.paramvar * (np.random.rand() - 0.5)
             )
-            self.filter.state = self.main.state
+            x = self.main.state
+            self.filter.phic.state = self.phic(x)
+            for system in (self.filter.q, self.filter.prp, self.filter.pru):
+                system.state = np.zeros_like(system.state)
+
+    def get_filter_inputs(self, x, u):
+        return [self.phic(x),
+                self.get_q(x),
+                self.get_prp(x),
+                self.get_pru(x, u)]
 
     def set_dot(self, t):
         x = self.main.state
-        xf = self.filter.state
         u = self.inner_ctrl.get(t, x)
         self.main.dot = self.deriv(x, u)
         self.inner_ctrl.dot = np.zeros_like(self.inner_ctrl.state)
-        self.filter.dot = -self.k * (xf - x)
+        self.set_filter_dot(x, u)
 
     def deriv(self, x, u):
         x1, x2 = x
@@ -95,32 +121,60 @@ class Env(core.BaseEnv):
         )
         return np.vstack((x1dot, x2dot))
 
+    def set_filter_dot(self, x, u):
+        fis = self.get_filter_inputs(x, u)
+        for system, fi in zip(self.filter.systems, fis):
+            system.dot = -self.k * (system.state - fi)
+
     def step(self):
         self.update()
         done = self.clock.time_over()
         return done
 
     def get_info(self, i, t, y, t_hist, ode_hist):
-        x, w, xf = self.observe_list(y)
+        states = self.observe_dict(y)
+        x = states["main"]
+        w = states["inner_ctrl"]
         u = self.inner_ctrl.get(t, x, w)
         return {
             "time": t,
             "state": x,
             "control": u,
-            "fstate": xf,
-            "fstate_dot": -self.k * (xf - x),
+            "filter": states["filter"]
         }
 
     def set_envdir(self, casedir):
         self.envdir = os.path.join(casedir, self.name)
 
+    def get_prp(self, x):
+        phia = self.phia(x)
+        return phia.dot(self.R).dot(phia.T)
+
+    def get_pru(self, x, u):
+        return self.phia(x).dot(self.R).dot(u)
+
+    def get_q(self, x):
+        return x.T.dot(self.Q).dot(x)
+
+    def phia(self, x):
+        x1, x2 = x
+        return np.vstack((x2 * np.cos(2 * x1), x2))
+
+    def phic(self, x):
+        return np.vstack((x ** 2, x[0] * x[1]))
+
+    def get_cost(self, x, u):
+        return self.get_q(x) + u.T.dot(self.R).dot(u)
+
 
 class BaseAgent(core.BaseEnv):
-    Q = np.eye(2)
-    R = np.ones((1, 1))
-
-    def __init__(self):
+    def __init__(self, env):
         super().__init__()
+        self.phia = env.phia
+        self.phic = env.phic
+        self.Q = env.Q
+        self.R = env.R
+        self.get_cost = env.get_cost
 
     def get_info(self):
         raise NotImplementedError
@@ -145,27 +199,22 @@ class BaseAgent(core.BaseEnv):
         philist, ylist = np.stack(philist), np.stack(ylist)
 
         # Least square
-        w = np.linalg.pinv(philist.squeeze()).dot(ylist)
+        w = np.linalg.pinv(philist.squeeze()).dot(ylist.squeeze())
         self.state = w.ravel()
         return self.observe_dict()
 
     def processing(self):
         raise NotImplementedError
 
-    def cost(self, x, u):
-        return x.T.dot(self.Q).dot(x) + u.T.dot(self.R).dot(u)
-
-    def phic(self, x):
-        return np.vstack((x ** 2, x[0] * x[1]))
-
 
 class RADP(BaseAgent):
-    def __init__(self, x_size, u_size, phia, T):
-        super().__init__()
-        self.phia = phia
+    def __init__(self, x_size, u_size, T, env, phia=None, phic=None):
+        super().__init__(env)
+        self.phia = phia or self.phia
+        self.phic = phic or self.phic
         self.vphia = np.vectorize(self.phia, signature="(n,1)->(p,m)")
         self.vphic = np.vectorize(self.phic, signature="(n,1)->(p,1)")
-        self.vcost = np.vectorize(self.cost, signature="(n,1),(m,1)->()")
+        self.vcost = np.vectorize(self.get_cost, signature="(n,1),(m,1)->()")
 
         x = np.zeros((x_size, 1))
         # wa_init = np.zeros((self.phia(x).shape[0], u_size))
@@ -189,7 +238,7 @@ class RADP(BaseAgent):
         u = data["control"]
         ui = self.vphia(x).transpose(0, 2, 1).dot(wa)
         delu = u - ui
-        phi2 = 2 * np.einsum(
+        phia = 2 * np.einsum(
             "bpm,bmo->bpo",
             self.vphia(x).dot(self.R),
             delu).squeeze()
@@ -201,7 +250,7 @@ class RADP(BaseAgent):
         for index in indexlist:
             xi = x[index]
             phi = np.vstack((
-                np.atleast_1d(sint.trapz(phi2[index], t[index], axis=0))[:, None],
+                np.atleast_1d(sint.trapz(phia[index], t[index], axis=0))[:, None],
                 self.phic(xi[-1]) - self.phic(xi[0])
             ))
             yi = np.atleast_1d(sint.trapz(y[index], t[index]))
@@ -225,17 +274,15 @@ class RADP(BaseAgent):
 
 
 class IFRADP(BaseAgent):
-    def __init__(self, x_size, u_size, phia, env):
-        super().__init__()
-        self.phia = phia
+    def __init__(self, x_size, u_size, env, phia=None, phic=None):
+        super().__init__(env)
+        self.phia = phia or self.phia
+        self.phic = phic or self.phic
+        self.k = env.k
         self.deriv = env.deriv
-        self.vphic = np.vectorize(self.phic, signature="(n,1)->(p,1)")
         self.vphia = np.vectorize(self.phia, signature="(n,1)->(p,m)")
-        self.vcost = np.vectorize(self.cost, signature="(n,1),(m,1)->()")
-        self.vgrad_phic = np.vectorize(
-            self.grad_phic, signature="(n,1)->(n,p)")
-        self.vphic_dot = np.vectorize(
-            self.phic_dot, signature="(n,1),(m,1)->(p,1)")
+        self.vphic = np.vectorize(self.phic, signature="(n,1)->(p,1)")
+        self.vcost = np.vectorize(self.get_cost, signature="(n,1),(m,1)->()")
 
         x = np.zeros((x_size, 1))
         # wa_init = np.zeros((self.phia(x).shape[0], u_size))
@@ -250,39 +297,28 @@ class IFRADP(BaseAgent):
         )
 
     def processing(self, data, wa):
-        t = data["time"]
-        x = data["state"]
-        xf = data["fstate"]
-        xf_dot = data["fstate_dot"]
-        u = data["control"]
-        ui = self.vphia(x).transpose(0, 2, 1).dot(wa)
-        delu = u - ui
-        grad_phic = self.vgrad_phic(xf)
-        phi1 = np.einsum("bnp,bno->bpo", grad_phic, xf_dot)
-        # phic = self.vphic(x).squeeze()
-        # phi1 = np.vstack([np.gradient(p, t) for p in phic.T]).T[..., None]
-        phi1_comp = self.vphic_dot(x, u)
-        breakpoint()
-        phi2 = 2 * np.einsum(
-            "bpm,bmo->bpo",
-            self.vphia(x).dot(self.R),
-            delu)
-        y = -self.vcost(x, ui)
+        n = len(data["time"])
+        # dn = int(n / 100)
+        # cutindex = slice(10, int(n), dn)
+        cutindex = slice(n)
+        t = data["time"][cutindex]
+        x = data["state"][cutindex, ...]
+        phicf, qf, prpf, pruf = (
+            data["filter"][k][cutindex, ...]
+            for k in ("phic", "q", "prp", "pru"))
+
+        phia = 2 * (pruf - prpf.dot(wa))
+        phic = self.k * (self.vphic(x) - phicf)
+        y = -qf - np.einsum("po,bpq,qo->b", wa, prpf, wa)[:, None, None]
 
         philist = []
         ylist = []
         for i in range(len(t)):
-            phi = np.vstack((phi2[i], phi1[i]))
+            phi = np.vstack((phia[i], phic[i]))
             philist.append(phi)
             ylist.append(y[i])
 
         return philist, ylist
-
-    def grad_phic(self, x):
-        return np.hstack((2 * np.diag(x.ravel()), np.flip(x)))
-
-    def phic_dot(self, x, u):
-        return self.grad_phic(x).T.dot(self.deriv(x, u))
 
 
 def _sample(env, num, tqdm=False):
@@ -306,7 +342,7 @@ def _train(agent):
     logger.set_info(agent.get_info())
 
     params = agent.observe_dict()
-    eps = 1e-10
+    eps = 1e-15
     for epoch in range(50):
         params_next = agent.policy_evaluation()
 
@@ -325,54 +361,48 @@ def main():
     pass
 
 
-def _case1():
+def _case1(skip_sample):
     # Case 1 : Different exploration data (different behavior)
     print("Case 1")
     print("======")
     casedir = os.path.join("data", "case1")
 
-    def phia(x):
-        x1, x2 = x
-        return np.vstack((x2 * np.cos(2 * x1), x2))
-
     envargs = np.random.rand(10, 2)
 
     for paramvar, noisescale in tqdm(envargs):
-        env = Env(phia, paramvar, noisescale)
+        env = Env(paramvar, noisescale)
         env.set_envdir(casedir)
-        _sample(env, 20)
+        if not skip_sample:
+            _sample(env, 20)
 
         # Train
         samplelist = sorted(glob(os.path.join(env.envdir, "sample-*.h5")))
         datalist = [logging.load(path) for path in samplelist]
 
-        agent = RADP(2, 1, phia, 0.05)
+        agent = RADP(2, 1, 0.05, env)
         agent.set_datalist(datalist)
         agent.set_trainpath(env.envdir)
         _train(agent)
 
 
-def _case2():
+def _case2(skip_sample):
     # Case 2 - Different integral time step
     print("Case 2")
     print("======")
     casedir = os.path.join("data", "case2")
 
-    def phia(x):
-        x1, x2 = x
-        return np.vstack((x2 * np.cos(2 * x1), x2))
-
     paramvar, noisescale = np.random.rand(2)
-    env = Env(phia, paramvar, noisescale*0)
+    env = Env(paramvar, noisescale*0)
     env.set_envdir(casedir)
-    _sample(env, 20, tqdm=True)
+    if not skip_sample:
+        _sample(env, 10, tqdm=True)
 
     samplelist = sorted(glob(os.path.join(env.envdir, "sample-*.h5")))
     datalist = [logging.load(path) for path in samplelist]
 
-    Tlist = [0.05, 0.5, 2]
-    agentlist = [IFRADP(2, 1, phia, env)]
-    agentlist += [RADP(2, 1, phia, T) for T in Tlist]
+    Tlist = [0.02, 0.5, 2]
+    agentlist = [IFRADP(2, 1, env)]
+    agentlist += [RADP(2, 1, T, env) for T in Tlist]
 
     for agent in tqdm(agentlist):
         agent.set_datalist(datalist)
@@ -380,7 +410,7 @@ def _case2():
         _train(agent)
 
 
-def _case3():
+def _case3(skip_sample):
     # Case 3 - Inaccurate basis function
     print("Case 3")
     print("======")
@@ -390,16 +420,17 @@ def _case3():
         return x
 
     paramvar, noisescale = np.random.rand(2)
-    env = Env(phia, paramvar, noisescale*0)
+    env = Env(paramvar, noisescale*0, phia=phia)
     env.set_envdir(casedir)
-    _sample(env, 20, tqdm=True)
+    if not skip_sample:
+        _sample(env, 10, tqdm=True)
 
     samplelist = sorted(glob(os.path.join(env.envdir, "sample-*.h5")))
     datalist = [logging.load(path) for path in samplelist]
 
-    Tlist = [0.05, 0.5, 2]
-    agentlist = [RADP(2, 1, phia, T) for T in Tlist]
-    agentlist += [IFRADP(2, 1, phia, env)]
+    Tlist = [0.02, 0.5, 2]
+    agentlist = [IFRADP(2, 1, env, phia=phia)]
+    agentlist += [RADP(2, 1, T, env, phia=phia) for T in Tlist]
 
     for agent in tqdm(agentlist):
         agent.set_datalist(datalist)
@@ -409,67 +440,58 @@ def _case3():
 
 @main.command()
 @click.option("--case", "-c", multiple=True, type=int)
-def train(case):
+@click.option("--pass-yes", "-y", is_flag=True)
+@click.option("--skip-sample", "-s", is_flag=True)
+def train(case, pass_yes, skip_sample):
     np.random.seed(0)
     caselist = {1: _case1, 2: _case2, 3: _case3}
 
     if not case:
-        if os.path.exists("data"):
-            if input(f"Delete \"data\"? [Y/n]: ") in ["", "Y", "y"]:
+        if not skip_sample and os.path.exists("data"):
+            if pass_yes or input(
+                    f"Delete \"data\"? [Y/n]: ") in ["", "Y", "y"]:
                 shutil.rmtree("data")
             else:
                 sys.exit()
 
         for case_run in caselist.values():
-            case_run()
+            case_run(skip_sample)
     else:
-        if input(f"Delete case{case}? [Y/n]: ") in ["", "Y", "y"]:
+        if not skip_sample:
+            dupdirs = []
             for c in case:
                 casedir = os.path.join("data", "case" + str(c))
-                shutil.rmtree(casedir)
-        else:
-            sys.exit()
+                if os.path.exists(casedir):
+                    dupdirs.append(casedir)
+
+            if dupdirs:
+                if pass_yes or input(
+                        f"Delete {', '.join(dupdirs)}? [Y/n]: ") in ["", "Y", "y"]:
+                    for d in dupdirs:
+                        shutil.rmtree(d)
+                else:
+                    sys.exit()
 
         for c in case:
-            caselist[c]()
+            caselist[c](skip_sample)
 
 
-@main.command()
-def plot():
+def draw_true(axes):
+    # Draw true parameters
+    for i in (1, 0.5, 0):
+        axes[0].axhline(i, c="r", ls="--")
+
+    for i in (-1, -2):
+        axes[1].axhline(i, c="r", ls="--")
+
+
+def set_axes(fig, axes):
+    fig.tight_layout()
+    fig.subplots_adjust(top=0.9, left=0.1)
+
+
+def _plot_case1():
     import matplotlib.pyplot as plt
-    import os
-    from glob import glob
-    from cycler import cycler
-
-    import fym.logging as logging
-
-    plt.rc("font", **{
-        "family": "sans-serif",
-        "sans-serif": ["Helvetica"],
-    })
-    plt.rc("text", usetex=True)
-    plt.rc("lines", linewidth=1)
-    plt.rc("axes", grid=True)
-    plt.rc("axes", prop_cycle=cycler(color="k"))
-    plt.rc("grid", linestyle="--", alpha=0.8)
-    plt.rc("figure", figsize=[6, 4])
-
-    def draw_true(axes):
-        # Draw true parameters
-        for i in (1, 0.5, 0):
-            axes[0].axhline(i, c="r", ls="--")
-
-        for i in (-1, -2):
-            axes[1].axhline(i, c="r", ls="--")
-
-    def set_axes(fig, axes):
-        axes[0].set_ylabel(r"$w_c$")
-        axes[0].set_xlim(left=0)
-        axes[1].set_ylabel(r"$w_a$")
-        axes[1].set_xlabel("Iteration")
-
-        fig.tight_layout()
-        fig.subplots_adjust(top=0.9, left=0.1)
 
     # Case 1
     casedir = os.path.join("data", "case1")
@@ -494,8 +516,14 @@ def plot():
 
     set_axes(fig, axes)
 
+
+def _plot_case2():
+    import matplotlib.pyplot as plt
+    from cycler import cycler
+
     # Case 2
     casedir = os.path.join("data", "case2")
+    samplelist = sorted(glob(os.path.join(casedir, "*", "sample-*.h5")))
     trainlist = sorted(glob(os.path.join(casedir, "*", "train-*.h5")))
 
     custom_cycler = (
@@ -503,11 +531,28 @@ def plot():
         * cycler(ls=["-", "--", "-.", ":"])
     )
 
+    # plot samples
+    fig, axes = plt.subplots(3, 1, sharex=True)
+    for samplepath, cc in zip(samplelist, custom_cycler()):
+        data = logging.load(samplepath)
+        t = data["time"]
+        x = data["state"].squeeze()
+        u = data["control"].squeeze()
+        axes[0].plot(t, x[:, 0], **cc)
+        axes[1].plot(t, x[:, 1], **cc)
+        axes[2].plot(t, u, **cc)
+
+    axes[0].set_ylabel(r"$x_1$")
+    axes[1].set_ylabel(r"$x_1$")
+    axes[2].set_ylabel(r"$u$")
+    axes[2].set_xlabel(r"Time [s]")
+    set_axes(fig, axes)
+
     fig, axes = plt.subplots(2, 1, sharex=True)
     draw_true(axes)
 
     legendlines = []
-    for trainpath, cc in zip(trainlist, custom_cycler):
+    for trainpath, cc in zip(trainlist, custom_cycler()):
         data, info = logging.load(trainpath, with_info=True)
         if info["classname"] == "RADP":
             label = rf"RADP ($T = {info['T']}$)"
@@ -522,6 +567,11 @@ def plot():
         legendlines.append(lines[0])
         axes[1].plot(epoch, wa, **cc)
 
+    axes[0].set_ylabel(r"$w_c$")
+    axes[0].set_xlim(left=0)
+    axes[1].set_ylabel(r"$w_a$")
+    axes[1].set_xlabel("Iteration")
+
     fig.legend(
         handles=legendlines,
         bbox_to_anchor=(0.1, 0.92, 0.87, .05),
@@ -530,12 +580,13 @@ def plot():
         mode="expand",
         borderaxespad=0.
     )
+
     set_axes(fig, axes)
 
     fig, axes = plt.subplots(2, 1)
 
     legendlines = []
-    for trainpath, cc in zip(trainlist, custom_cycler):
+    for trainpath, cc in zip(trainlist, custom_cycler()):
         data, info = logging.load(trainpath, with_info=True)
         if info["classname"] == "RADP":
             label = rf"RADP ($T = {info['T']}$)"
@@ -564,6 +615,11 @@ def plot():
         borderaxespad=0.
     )
     set_axes(fig, axes)
+
+
+def _plot_case3():
+    import matplotlib.pyplot as plt
+    from cycler import cycler
 
     # Case 3
     casedir = os.path.join("data", "case3")
@@ -601,6 +657,11 @@ def plot():
         legendlines.append(lines[0])
         axes[1].plot(epoch, wa, **cc)
 
+    axes[0].set_ylabel(r"$w_c$")
+    axes[0].set_xlim(left=0)
+    axes[1].set_ylabel(r"$w_a$")
+    axes[1].set_xlabel("Iteration")
+
     fig.legend(
         handles=legendlines,
         bbox_to_anchor=(0.1, 0.92, 0.87, .05),
@@ -610,6 +671,37 @@ def plot():
         borderaxespad=0.
     )
     set_axes(fig, axes)
+
+
+@main.command()
+@click.option("--case", "-c", multiple=True, type=int)
+def plot(case):
+    import matplotlib.pyplot as plt
+    import os
+    from glob import glob
+    from cycler import cycler
+
+    import fym.logging as logging
+
+    plt.rc("font", **{
+        "family": "sans-serif",
+        "sans-serif": ["Helvetica"],
+    })
+    plt.rc("text", usetex=True)
+    plt.rc("lines", linewidth=1)
+    plt.rc("axes", grid=True)
+    plt.rc("axes", prop_cycle=cycler(color="k"))
+    plt.rc("grid", linestyle="--", alpha=0.8)
+    plt.rc("figure", figsize=[6, 4])
+
+    caselist = {1: _plot_case1, 2: _plot_case2, 3: _plot_case3}
+
+    if not case:
+        for case_run in caselist.values():
+            case_run()
+    else:
+        for c in case:
+            caselist[c]()
 
     plt.show()
 
