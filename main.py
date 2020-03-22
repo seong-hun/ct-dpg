@@ -274,6 +274,7 @@ class RADP(BaseAgent):
 
 
 class IFRADP(BaseAgent):
+    """Integral-Free RADP"""
     def __init__(self, x_size, u_size, env, phia=None, phic=None):
         super().__init__(env)
         self.phia = phia or self.phia
@@ -310,6 +311,35 @@ class IFRADP(BaseAgent):
         phia = 2 * (pruf - prpf.dot(wa))
         phic = self.k * (self.vphic(x) - phicf)
         y = -qf - np.einsum("po,bpq,qo->b", wa, prpf, wa)[:, None, None]
+
+        philist = []
+        ylist = []
+        for i in range(len(t)):
+            phi = np.vstack((phia[i], phic[i]))
+            philist.append(phi)
+            ylist.append(y[i])
+
+        return philist, ylist
+
+
+class NDRADP(IFRADP):
+    """Numerical Differentiator RADP"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def processing(self, data, wa):
+        t = data["time"]
+        x = data["state"]
+        u = data["control"]
+        vphia = self.vphia(x)
+        vphic = self.vphic(x)
+        ui = vphia.transpose(0, 2, 1).dot(wa)
+        phia = 2 * np.einsum("bpm,bmo->bpo", vphia.dot(self.R), u - ui)
+        phic = np.vstack([
+            np.gradient(v, t)
+            for v in vphic.squeeze().T
+        ]).T[..., None]
+        y = -self.vcost(x, ui)
 
         philist = []
         ylist = []
@@ -401,7 +431,8 @@ def _case2(skip_sample):
     datalist = [logging.load(path) for path in samplelist]
 
     Tlist = [0.02, 0.5, 2]
-    agentlist = [IFRADP(2, 1, env)]
+    agentlist = [NDRADP(2, 1, env)]
+    agentlist += [IFRADP(2, 1, env)]
     agentlist += [RADP(2, 1, T, env) for T in Tlist]
 
     for agent in tqdm(agentlist):
@@ -556,9 +587,12 @@ def _plot_case2():
         data, info = logging.load(trainpath, with_info=True)
         if info["classname"] == "RADP":
             label = rf"RADP ($T = {info['T']}$)"
-        else:
+        elif info["classname"] == "IFRADP":
             label = r"IFRADP"
             cc = dict(color="b", ls="-", zorder=10)
+        elif info["classname"] == "NDRADP":
+            label = r"NDRADP"
+            cc = dict(color="g", ls="-", zorder=10)
         epoch = data["epoch"]
         wa = data["params"]["wa"].squeeze()
         wc = data["params"]["wc"].squeeze()
@@ -590,9 +624,12 @@ def _plot_case2():
         data, info = logging.load(trainpath, with_info=True)
         if info["classname"] == "RADP":
             label = rf"RADP ($T = {info['T']}$)"
-        else:
+        elif info["classname"] == "IFRADP":
             label = r"IFRADP"
             cc = dict(color="b", ls="-", zorder=10)
+        elif info["classname"] == "NDRADP":
+            label = r"NDRADP"
+            cc = dict(color="g", ls="-", zorder=10)
         epoch = data["epoch"]
         wa = data["params"]["wa"].squeeze()
         ewa = np.linalg.norm(wa - [-1, -2], axis=1)
